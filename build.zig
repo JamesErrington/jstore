@@ -13,20 +13,22 @@ pub fn build(b: *std.Build) !void {
     });
 
     exe.addModule("tasiadb", b.createModule(.{
-    	.source_file = .{ .path = "tasiadb/lib.zig" },
+        .source_file = .{ .path = "tasiadb/lib.zig" },
     }));
+
+    exe.linkLibC();
 
     b.installArtifact(exe);
 
     {
-	    const options = b.addOptions();
-	    options.addOption([]const u8, "version", "0.0.1");
+        const options = b.addOptions();
+        options.addOption([]const u8, "version", "0.0.1");
 
-	    const now = datetime.datetime.Datetime.now();
-	    const now_str = now.formatISO8601(b.allocator, false) catch "";
-	    options.addOption([]const u8, "date", now_str);
+        const now = datetime.datetime.Datetime.now();
+        const now_str = now.formatISO8601(b.allocator, false) catch "";
+        options.addOption([]const u8, "date", now_str);
 
-		exe.addOptions("config", options);
+        exe.addOptions("build", options);
     }
 
     {
