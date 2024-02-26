@@ -1,5 +1,5 @@
 const std = @import("std");
-const datetime = @import("vendor/zig-datetime/src/main.zig");
+const zdt = @import("vendor/zig-datetime/src/main.zig");
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
@@ -7,28 +7,28 @@ pub fn build(b: *std.Build) !void {
 
     const exe = b.addExecutable(.{
         .name = "tasiadb",
-        .root_source_file = .{ .path = "tasiadb-cli/main.zig" },
+        .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
         .optimize = optimize,
     });
 
-    exe.addModule("tasiadb", b.createModule(.{
-        .source_file = .{ .path = "tasiadb/lib.zig" },
-    }));
-
+    // Needed for the c allocator
     exe.linkLibC();
 
     b.installArtifact(exe);
 
     {
         const options = b.addOptions();
+        options.addOption([]const u8, "name", "TasiaDB");
         options.addOption([]const u8, "version", "0.0.1");
 
-        const now = datetime.datetime.Datetime.now();
-        const now_str = now.formatISO8601(b.allocator, false) catch "";
-        options.addOption([]const u8, "date", now_str);
+        const now = zdt.datetime.Datetime.now();
+        const date_str = try std.fmt.allocPrint(b.allocator, "{d:0>4}-{d:0>2}-{d:0>2}", .{ now.date.year, now.date.month, now.date.day });
+        options.addOption([]const u8, "date", date_str);
+        const time_str = try std.fmt.allocPrint(b.allocator, "{d:0>2}:{d:0>2}:{d:0>2}", .{ now.time.hour, now.time.minute, now.time.second });
+        options.addOption([]const u8, "time", time_str);
 
-        exe.addOptions("build", options);
+        exe.root_module.addOptions("build", options);
     }
 
     {
@@ -40,7 +40,7 @@ pub fn build(b: *std.Build) !void {
     }
 
     {
-        const fmt_cmd = b.addFmt(.{ .paths = &.{"."}, .check = false });
+        const fmt_cmd = b.addFmt(.{ .paths = &.{"."}, .exclude_paths = &.{"vendor/"}, .check = false });
 
         const fmt_step = b.step("fmt", "Format .zig files");
         fmt_step.dependOn(&fmt_cmd.step);
