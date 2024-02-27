@@ -4,10 +4,16 @@ const tdb = @import("./lib.zig");
 
 pub fn main() !void {
     var iter = try tdb.WALIterator.init("./test.bin");
+    defer iter.deinit();
 
     while (iter.next()) |entry| {
-        std.debug.print("Key: '{s}'\n", .{entry.key});
+        std.debug.print("Key: '{}'\n", .{entry});
+        std.heap.c_allocator.free(entry.key);
+        std.heap.c_allocator.free(entry.value);
     }
+
+    var wal = try tdb.WAL.init("./data/");
+    defer wal.deinit();
 }
 
 // pub fn main() !void {

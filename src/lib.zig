@@ -2,6 +2,8 @@ const std = @import("std");
 
 const ZipTree = @import("./storage/ziptree.zig");
 
+const assert = std.debug.assert;
+
 const DB = struct {
     dirname: []const u8,
 
@@ -64,25 +66,59 @@ pub const WALIterator = struct {
 
     pub fn next(self: *WALIterator) ?WALEntry {
         const reader = self.buffer.reader();
-        var len_buf: [8]u8 = [_]u8{0} ** 8;
+        var buffer = std.mem.zeroes([8]u8);
 
-        var read = reader.read(&len_buf) catch 0;
-        if (read != len_buf.len) return null;
-        const key_len = std.mem.readVarInt(u64, &len_buf, .little);
-
-        // _ = self.reader.read(&len_buf) catch {
-        //     return null;
-        // };
-        // const val_len = std.mem.readVarInt(u64, &len_buf, .little);
+        var read = reader.read(&buffer) catch 0;
+        if (read != buffer.len) return null;
+        const key_len = std.mem.readVarInt(u64, &buffer, .little);
+        assert(key_len > 0);
 
         const key_buf = std.heap.c_allocator.alloc(u8, key_len) catch return null;
         read = reader.read(key_buf) catch 0;
         if (read != key_buf.len) return null;
 
+        read = reader.read(&buffer) catch 0;
+        if (read != buffer.len) return null;
+        const val_len = std.mem.readInt(u64, &buffer, .little);
+        assert(val_len > 0);
+
+        const val_buf = std.heap.c_allocator.alloc(u8, val_len) catch return null;
+        read = reader.read(val_buf) catch 0;
+        if (read != val_buf.len) return null;
+
+        read = reader.read(&buffer) catch 0;
+        if (read != buffer.len) return null;
+        const timestamp = std.mem.readInt(u64, &buffer, .little);
+
         return .{
             .key = key_buf,
-            .value = "",
-            .timestamp = 0,
+            .value = val_buf,
+            .timestamp = timestamp,
         };
+    }
+};
+
+pub const WAL = struct {
+    file: std.fs.File,
+    buffer: std.io.BufferedWriter(4096, std.fs.File.Writer),
+
+    pub fn init(dirname: []const u8) !WAL {
+        try std.fs.cwd().makePath(dirname);
+
+        const timestamp: u64 = @intCast(std.time.microTimestamp());
+        const filename = try std.fmt.allocPrint(std.heap.c_allocator, "{s}/{d}.wal", .{dirname, timestamp});
+        defer std.heap.c_allocator.free(filename);
+
+        const file = try std.fs.cwd().createFile(filename, .{ });
+        const buffer = std.io.bufferedWriter(file.writer());
+
+        return .{
+            .file = file,
+            .buffer = buffer,
+        };
+    }
+
+    pub fn deinit(self: WAL) void {
+        self.file.close();
     }
 };
