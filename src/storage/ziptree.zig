@@ -21,8 +21,15 @@ fn Pair(comptime T: type, comptime U: type) type {
 }
 
 root: ?*Node = null,
-randgen: std.Random.DefaultPrng = std.Random.DefaultPrng.init(0),
+randgen: std.Random.DefaultPrng,
 allocator: std.mem.Allocator,
+
+pub fn init(allocator: std.mem.Allocator, seed: ?u64) Self {
+    var _seed: u64 = @intCast(std.time.microTimestamp());
+    if (seed) |s| _seed = s;
+
+    return .{ .allocator = allocator, .randgen = std.Random.DefaultPrng.init(_seed) };
+}
 
 pub fn deinit(self: Self) void {
     self.delete_subtree(self.root);
@@ -213,7 +220,7 @@ fn find_node(self: Self, key: []const u8) Pair(?*Node, ?*?*Node) {
 const expect = std.testing.expect;
 const expectError = std.testing.expectError;
 test {
-    var tree = Self{ .allocator = std.testing.allocator };
+    var tree = Self.init(std.testing.allocator, 0);
     defer tree.deinit();
 
     try expect(tree.search("a") == null);
@@ -225,19 +232,19 @@ test {
     try expect(tree.delete("a"));
     try expect(tree.delete("a") == false);
 
-    var fail = Self{ .allocator = std.testing.failing_allocator };
+    var fail = Self.init(std.testing.failing_allocator, 0);
     try expectError(AllocError.OutOfMemory, fail.insert("a", "a"));
 }
 
 test {
-    var tree = Self{ .allocator = std.testing.allocator };
+    var tree = Self.init(std.testing.allocator, 0);
 
     try expect(try tree.insert("a", "a"));
     try expect(tree.delete("a"));
 }
 
 test {
-    var tree = Self{ .allocator = std.testing.allocator };
+    var tree = Self.init(std.testing.allocator, 0);
     defer tree.deinit();
 
     const keys = [_][]const u8{ "c", "b", "a" };
@@ -253,7 +260,7 @@ test {
 }
 
 test {
-    var tree = Self{ .allocator = std.testing.allocator };
+    var tree = Self.init(std.testing.allocator, 0);
     defer tree.deinit();
 
     const keys = [_][]const u8{ "a", "b", "c" };
@@ -269,7 +276,7 @@ test {
 }
 
 test {
-    var tree = Self{ .allocator = std.testing.allocator };
+    var tree = Self.init(std.testing.allocator, 0);
     defer tree.deinit();
 
     const keys = [_][]const u8{ "b", "a", "c" };
@@ -352,7 +359,7 @@ fn check_ranks(node: *Node) bool {
 }
 
 test {
-    var tree = Self{ .allocator = std.testing.allocator };
+    var tree = Self.init(std.testing.allocator, 0);
     defer tree.deinit();
 
     const keys = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g" };
@@ -368,7 +375,7 @@ test {
 }
 
 test {
-    var tree = Self{ .allocator = std.testing.allocator };
+    var tree = Self.init(std.testing.allocator, 0);
     defer tree.deinit();
 
     const keys = [_][]const u8{ "f", "e", "g", "a", "b", "d", "c" };
@@ -384,7 +391,7 @@ test {
 }
 
 test {
-    var tree = Self{ .allocator = std.testing.allocator };
+    var tree = Self.init(std.testing.allocator, 0);
     defer tree.deinit();
 
     const keys = [_][]const u8{ "g", "f", "e", "d", "c", "b", "a" };
