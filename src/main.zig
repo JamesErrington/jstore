@@ -3,17 +3,21 @@ const std = @import("std");
 const tdb = @import("./lib.zig");
 
 pub fn main() !void {
-    var iter = try tdb.WALIterator.init("./test.bin");
-    defer iter.deinit();
+    var memtable = try tdb.DB.LoadFromDir("./data/");
 
-    while (iter.next()) |entry| {
-        std.debug.print("Key: '{}'\n", .{entry});
-        std.heap.c_allocator.free(entry.key);
-        std.heap.c_allocator.free(entry.value);
-    }
+    std.debug.print("Name: {?s}\n", .{memtable.Get("name")});
+    std.debug.print("Country: {?s}\n", .{memtable.Get("country")});
+    std.debug.print("Message: {?s}\n", .{memtable.Get("message")});
 
-    var wal = try tdb.WAL.init("./data/");
-    defer wal.deinit();
+    // var wal = try tdb.WAL.Create("./data/");
+    // defer wal.Deinit();
+
+    // try wal.WriteEntry(.{
+    //     .key = "country",
+    //     .value = "United Kingdom",
+    //     .timestamp = @intCast(std.time.microTimestamp()),
+    // });
+    // try wal.Flush();
 }
 
 // pub fn main() !void {
