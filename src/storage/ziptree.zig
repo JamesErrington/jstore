@@ -13,6 +13,13 @@ const Node = struct {
     right: ?*Node,
 };
 
+fn Pair(comptime T: type, comptime U: type) type {
+    return struct {
+        first: T,
+        second: U,
+    };
+}
+
 root: ?*Node = null,
 randgen: std.Random.DefaultPrng = std.Random.DefaultPrng.init(0),
 allocator: std.mem.Allocator,
@@ -60,8 +67,25 @@ pub fn insert(self: *Self, key: []const u8, value: []const u8) AllocError!bool {
     return true;
 }
 
+pub fn delete(self: *Self, key: []const u8) bool {
+    const p = self.find_node(key);
+    if (p.first) |node| {
+        if (p.second) |ptr| {
+            ptr.* = zip(node.left, node.right);
+        } else {
+            self.root = zip(node.left, node.right);
+        }
+
+        self.allocator.destroy(node);
+        return true;
+    }
+
+    return false;
+}
+
 pub fn search(self: Self, key: []const u8) ?[]const u8 {
-    if (self.find_node(key)) |node| {
+    const p = self.find_node(key);
+    if (p.first) |node| {
         return node.value;
     }
 
@@ -77,7 +101,34 @@ fn random_rank(self: *Self) u8 {
     return rank;
 }
 
-fn unzip(node: ?*Node, key: []const u8) struct { first: ?*Node, second: ?*Node } {
+fn zip(first: ?*Node, second: ?*Node) ?*Node {
+    if (first == null) return second;
+    if (second == null) return first;
+
+    if (first.?.rank >= second.?.rank) {
+        const right = first.?.right;
+        if (right != null and right.?.rank >= second.?.rank) {
+            first.?.*.right = zip(right, second);
+        } else {
+            first.?.*.right = second;
+            second.?.*.left = zip(right, second.?.left);
+        }
+
+        return first;
+    } else {
+        const left = second.?.left;
+        if (left != null and left.?.rank >= first.?.rank) {
+            second.?.*.left = zip(first, left);
+        } else {
+            second.?.*.left = first;
+            first.?.*.right = zip(first.?.right, left);
+        }
+
+        return second;
+    }
+}
+
+fn unzip(node: ?*Node, key: []const u8) Pair(?*Node, ?*Node) {
     if (node) |nnode| {
         switch (std.mem.order(u8, key, nnode.key)) {
             .lt => {
@@ -139,17 +190,24 @@ fn delete_subtree(self: Self, root: ?*Node) void {
     }
 }
 
-fn find_node(self: Self, key: []const u8) ?*Node {
+fn find_node(self: Self, key: []const u8) Pair(?*Node, ?*?*Node) {
     var curr = self.root;
+    var edge: ?*?*Node = null;
     while (curr) |curr_node| {
         switch (std.mem.order(u8, key, curr_node.key)) {
-            .lt => curr = curr_node.left,
-            .gt => curr = curr_node.right,
-            .eq => return curr_node,
+            .lt => {
+                edge = &(curr_node.left);
+                curr = curr_node.left;
+            },
+            .gt => {
+                edge = &(curr_node.right);
+                curr = curr_node.right;
+            },
+            .eq => return .{ .first = curr_node, .second = edge },
         }
     }
 
-    return null;
+    return .{ .first = null, .second = null };
 }
 
 const expect = std.testing.expect;
@@ -159,11 +217,23 @@ test {
     defer tree.deinit();
 
     try expect(tree.search("a") == null);
+    try expect(tree.delete("a") == false);
+
     try expect(try tree.insert("a", "a"));
     try expect(try tree.insert("a", "a") == false);
 
+    try expect(tree.delete("a"));
+    try expect(tree.delete("a") == false);
+
     var fail = Self{ .allocator = std.testing.failing_allocator };
     try expectError(AllocError.OutOfMemory, fail.insert("a", "a"));
+}
+
+test {
+    var tree = Self{ .allocator = std.testing.allocator };
+
+    try expect(try tree.insert("a", "a"));
+    try expect(tree.delete("a"));
 }
 
 test {
@@ -287,10 +357,14 @@ test {
 
     const keys = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g" };
     for (keys) |key| {
-        _ = try tree.insert(key, key);
+        try expect(try tree.insert(key, key));
+        try expect(check_correct(tree));
     }
 
-    try expect(check_correct(tree));
+    for (keys) |key| {
+        try expect(tree.delete(key));
+        try expect(check_correct(tree));
+    }
 }
 
 test {
@@ -299,10 +373,14 @@ test {
 
     const keys = [_][]const u8{ "f", "e", "g", "a", "b", "d", "c" };
     for (keys) |key| {
-        _ = try tree.insert(key, key);
+        try expect(try tree.insert(key, key));
+        try expect(check_correct(tree));
     }
 
-    try expect(check_correct(tree));
+    for (keys) |key| {
+        try expect(tree.delete(key));
+        try expect(check_correct(tree));
+    }
 }
 
 test {
@@ -311,8 +389,12 @@ test {
 
     const keys = [_][]const u8{ "g", "f", "e", "d", "c", "b", "a" };
     for (keys) |key| {
-        _ = try tree.insert(key, key);
+        try expect(try tree.insert(key, key));
+        try expect(check_correct(tree));
     }
 
-    try expect(check_correct(tree));
+    for (keys) |key| {
+        try expect(tree.delete(key));
+        try expect(check_correct(tree));
+    }
 }
