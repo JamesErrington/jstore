@@ -3,11 +3,15 @@ const std = @import("std");
 const tdb = @import("./lib.zig");
 
 pub fn main() !void {
-    var memtable = try tdb.DB.LoadFromDir("./data/");
+    var db = try tdb.DB.LoadFromDir(std.heap.c_allocator, "./data/");
+    defer db.memtable.Destroy();
 
-    std.debug.print("Name: {?s}\n", .{memtable.Get("name")});
-    std.debug.print("Country: {?s}\n", .{memtable.Get("country")});
-    std.debug.print("Message: {?s}\n", .{memtable.Get("message")});
+    std.debug.print("Name: {?s}\n", .{db.memtable.Get("name")});
+    std.debug.print("Country: {?s}\n", .{db.memtable.Get("country")});
+    std.debug.print("Message: {?s}\n", .{db.memtable.Get("message")});
+
+    db.memtable.UpdateSize();
+    std.debug.print("MemTable size: {}\n", .{db.memtable.size});
 
     // var wal = try tdb.WAL.Create("./data/");
     // defer wal.Deinit();
