@@ -8,6 +8,7 @@ fn lessThanString(_: void, lhs: []const u8, rhs: []const u8) bool {
 
 pub const DB = struct {
     memtable: MemTable,
+    wal_writer: WAL.Writer,
 
     pub fn LoadFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !DB {
         var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
@@ -20,27 +21,41 @@ pub const DB = struct {
         var dir_iter = dir.iterate();
         while (try dir_iter.next()) |item| {
             if (item.kind == .file and std.mem.eql(u8, std.fs.path.extension(item.name), ".wal")) {
-                try list.append(item.name);
+                const path = std.fmt.allocPrint(arena.allocator(), "{s}/{s}", .{ dir_path, item.name }) catch unreachable;
+                try list.append(path);
             }
         }
 
         std.sort.heap([]const u8, list.items, {}, lessThanString);
+
         var memtable = MemTable.Create(allocator);
+        var wal_writer = try WAL.Writer.Create(arena.allocator(), dir_path);
 
-        for (list.items) |filename| {
-            const path = try std.fmt.allocPrint(arena.allocator(), "{s}/{s}", .{dir_path, filename});
-
-            var wal_iter = try WAL.Iterator.Create(path);
+        for (list.items) |file_path| {
+            var wal_iter = try WAL.Iterator.Create(file_path);
             defer wal_iter.Destroy();
 
             while (try wal_iter.Next(memtable.arena.allocator())) |entry| {
+                try wal_writer.WriteEntry(entry);
                 memtable.Set(entry.key, entry.value);
             }
         }
 
+        try wal_writer.Flush();
+
+        for (list.items) |file_path| {
+            try std.fs.cwd().deleteFile(file_path);
+        }
+
         return .{
             .memtable = memtable,
+            .wal_writer = wal_writer,
         };
+    }
+
+    pub fn Close(self: *DB) void {
+        self.memtable.Destroy();
+        self.wal_writer.Destroy();
     }
 };
 
@@ -63,11 +78,16 @@ const MemTable = struct {
         self.arena.deinit();
     }
 
+    pub fn Size(self: *MemTable) usize {
+        return self.size;
+    }
+
     pub fn Get(self: *MemTable, key: []const u8) ?[]const u8 {
         return self.entries.get(key);
     }
 
     pub fn Set(self: *MemTable, key: []const u8, value: []const u8) void {
+        self.size += key.len + value.len;
         self.entries.put(self.arena.allocator(), key, value) catch unreachable;
     }
 
@@ -114,7 +134,8 @@ const WAL = struct {
 
         pub fn Next(self: *Iterator, allocator: std.mem.Allocator) !?Entry {
             const reader = self.buffered_reader.reader();
-            var buffer = std.mem.zeroes([8]u8);
+            var buffer = std.mem.zeroes([@sizeOf(u64)]u8);
+            comptime assert(buffer.len == @sizeOf(u64));
 
             // Key Length: 8 bytes
             var bytes_read = try reader.read(&buffer);
@@ -152,51 +173,53 @@ const WAL = struct {
             };
         }
     };
+
+    pub const Writer = struct {
+        file: std.fs.File,
+        buffered_writer: std.io.BufferedWriter(4096, std.fs.File.Writer),
+
+        pub fn Create(allocator: std.mem.Allocator, dir_path: []const u8) !Writer {
+            try std.fs.cwd().makePath(dir_path);
+
+            const timestamp: u64 = @intCast(std.time.microTimestamp());
+            const filename = try std.fmt.allocPrint(allocator, "{s}/{d}.wal", .{ dir_path, timestamp });
+            defer allocator.free(filename);
+
+            const file = try std.fs.cwd().createFile(filename, .{});
+            const buffered_writer = std.io.bufferedWriter(file.writer());
+
+            return .{
+                .file = file,
+                .buffered_writer = buffered_writer,
+            };
+        }
+
+        pub fn Destroy(self: *Writer) void {
+            self.file.close();
+        }
+
+        pub fn WriteEntry(self: *Writer, entry: Entry) !void {
+            const writer = self.buffered_writer.writer();
+
+            const key_len_bytes = std.mem.asBytes(&(@as(u64, entry.key.len)));
+            var bytes_written = try writer.write(key_len_bytes);
+            assert(bytes_written == key_len_bytes.len);
+            bytes_written = try writer.write(entry.key);
+            assert(bytes_written == entry.key.len);
+
+            const val_len_bytes = std.mem.asBytes(&(@as(u64, entry.value.len)));
+            bytes_written = try writer.write(val_len_bytes);
+            assert(bytes_written == val_len_bytes.len);
+            bytes_written = try writer.write(entry.value);
+            assert(bytes_written == entry.value.len);
+
+            const timestamp_bytes = std.mem.asBytes(&(entry.timestamp));
+            bytes_written = try writer.write(timestamp_bytes);
+            assert(bytes_written == timestamp_bytes.len);
+        }
+
+        pub fn Flush(self: *Writer) !void {
+            try self.buffered_writer.flush();
+        }
+    };
 };
-
-// pub const WAL = struct {
-//     file: std.fs.File,
-//     buffer: std.io.BufferedWriter(4096, std.fs.File.Writer),
-
-//     pub fn Create(dirname: []const u8) !WAL {
-//         try std.fs.cwd().makePath(dirname);
-
-//         const timestamp: u64 = @intCast(std.time.microTimestamp());
-//         const filename = try std.fmt.allocPrint(allocator, "{s}/{d}.wal", .{dirname, timestamp});
-//         defer allocator.free(filename);
-
-//         const file = try std.fs.cwd().createFile(filename, .{ });
-//         const buffer = std.io.bufferedWriter(file.writer());
-
-//         return .{
-//             .file = file,
-//             .buffer = buffer,
-//         };
-//     }
-
-//     pub fn Deinit(self: WAL) void {
-//         self.file.close();
-//     }
-
-//     pub fn WriteEntry(self: *WAL, entry: WALEntry) !void {
-//         const writer = self.buffer.writer();
-
-//         const key_len_bytes = std.mem.asBytes(&(@as(u64, entry.key.len)));
-//         std.debug.print("{any}\n", .{key_len_bytes});
-//         _ = try writer.write(key_len_bytes);
-//         _ = try writer.write(entry.key);
-
-//         const val_len_bytes = std.mem.asBytes(&(@as(u64, entry.value.len)));
-//         std.debug.print("{any}\n", .{val_len_bytes});
-//         _ = try writer.write(val_len_bytes);
-//         _ = try writer.write(entry.value);
-
-//         const timestamp_bytes = std.mem.asBytes(&(entry.timestamp));
-//         std.debug.print("{any}\n", .{timestamp_bytes});
-//         _ = try writer.write(timestamp_bytes);
-//     }
-
-//     pub fn Flush(self: *WAL) !void {
-//         try self.buffer.flush();
-//     }
-// };
