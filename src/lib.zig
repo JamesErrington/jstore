@@ -10,16 +10,20 @@ fn lessThanString(_: void, lhs: []const u8, rhs: []const u8) bool {
     return std.mem.order(u8, lhs, rhs) == .lt;
 }
 
+// Size a MemTable can grow to before being flushed to disk
+const MEMTABLE_THRESHOLD_BYTES = 1030;
+// The fraction of entries included in the index file e.g. 5 = every 5th entry
+const INDEX_SPARSE_FRACTION = 5;
+comptime {
+    assert(MEMTABLE_THRESHOLD_BYTES > 0);
+    assert(INDEX_SPARSE_FRACTION > 0);
+}
+
 pub const DB = struct {
     root_path: []const u8,
     allocator: std.mem.Allocator,
     memtable: MemTable,
     wal_writer: WAL.Writer,
-
-    const MEMTABLE_THRESHOLD_BYTES = 4096;
-    comptime {
-        assert(MEMTABLE_THRESHOLD_BYTES > 0);
-    }
 
     pub fn LoadFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !DB {
         var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
@@ -47,6 +51,7 @@ pub const DB = struct {
             defer wal_iter.Destroy();
 
             while (try wal_iter.Next(memtable.arena.allocator())) |entry| {
+                // TODO should this use DB.Set so it flushes the memtable?
                 try wal_writer.WriteEntry(entry);
                 memtable.Set(entry.key, entry.value);
             }
@@ -108,14 +113,16 @@ pub const DB = struct {
         try self.memtable.entries.reIndex(arena.allocator());
 
         var cursor: usize = 0;
-        for (keys) |key| {
+        for (keys, 0..) |key, i| {
             const value = self.memtable.Get(key).?;
             cursor += key.len;
 
-            try index_writer.writeAll(std.mem.asBytes(&(@as(u64, key.len))));
-            try index_writer.writeAll(key);
-            try index_writer.writeAll(std.mem.asBytes(&(@as(u64, cursor))));
-            try index_writer.writeAll(std.mem.asBytes(&(@as(u64, value.len))));
+            if (i % INDEX_SPARSE_FRACTION == 0) {
+                try index_writer.writeAll(std.mem.asBytes(&(@as(u64, key.len))));
+                try index_writer.writeAll(key);
+                try index_writer.writeAll(std.mem.asBytes(&(@as(u64, cursor))));
+                try index_writer.writeAll(std.mem.asBytes(&(@as(u64, value.len))));
+            }
 
             try db_writer.writeAll(key);
             try db_writer.writeAll(value);
@@ -133,7 +140,7 @@ pub const DB = struct {
         if (self.memtable.Get(key)) |value|  {
             return value;
         }
-        std.debug.print("Searching Disk\n", .{});
+
         var dir = try std.fs.cwd().openDir(self.root_path, .{ .iterate = true });
         defer dir.close();
 
@@ -147,8 +154,8 @@ pub const DB = struct {
                 defer arena.deinit();
 
                 var index = Index.Init(&index_file);
-
                 if (try index.Search(key, arena.allocator())) |entry| {
+                    std.debug.print("Search returned: {}\n", .{entry});
                     // TODO fix this hacky way to get the file name
                     const db_file = try dir.openFile(item.name[0..item.name.len-1], .{});
                     defer db_file.close();
@@ -189,7 +196,9 @@ const MemTable = struct {
     }
 
     pub fn Reset(self: *MemTable) void {
+        // TODO look at this
         self.arena.deinit();
+        self.arena = std.heap.ArenaAllocator.init(self.arena.child_allocator);
         self.entries = std.StringArrayHashMapUnmanaged([]const u8){};
         self.size = 0;
     }
@@ -343,7 +352,6 @@ const Index = struct {
     }
 
     const Entry = struct {
-        key: []const u8,
         offset: usize,
         length: usize,
     };
@@ -354,6 +362,7 @@ const Index = struct {
         assert(bytes.len > 0);
 
         var cursor: usize = 0;
+        var prev: ?Entry = null;
         while (true) {
             if (cursor >= bytes.len) return null;
 
@@ -371,28 +380,26 @@ const Index = struct {
             const index_key = bytes[cursor..cursor+step];
             cursor += step;
 
-            if (std.mem.eql(u8, key, index_key)) {
-                // Offset: 8 bytes
-                step = @sizeOf(u64);
-                assert(cursor + step < bytes.len);
-                const offset_buffer = bytes[cursor..cursor+step];
-                const offset = std.mem.readVarInt(u64, offset_buffer, .little);
-                cursor += step;
+            // Offset: 8 bytes
+            step = @sizeOf(u64);
+            assert(cursor + step < bytes.len);
+            const offset_buffer = bytes[cursor..cursor+step];
+            const offset = std.mem.readVarInt(u64, offset_buffer, .little);
+            cursor += step;
 
-                // Value Length: 8 bytes
-                step = @sizeOf(u64);
-                assert(cursor + step < bytes.len);
-                const length_buffer = bytes[cursor..cursor+step];
-                const length = std.mem.readVarInt(u64, length_buffer, .little);
-                cursor += step;
+            // Value Length: 8 bytes
+            step = @sizeOf(u64);
+            assert(cursor + step < bytes.len);
+            const length_buffer = bytes[cursor..cursor+step];
+            const length = std.mem.readVarInt(u64, length_buffer, .little);
+            cursor += step;
 
-                return .{
-                    .key = index_key,
-                    .offset = offset,
-                    .length = length,
-                };
-            } else {
-                cursor += 2 * @sizeOf(u64);
+            std.debug.print("Found key: {s}\n", .{index_key});
+            const entry = Entry{ .offset = offset, .length = length };
+            switch (std.mem.order(u8, index_key, key)) {
+                .lt => prev = entry,
+                .eq => return entry,
+                .gt => return prev,
             }
         }
     }
