@@ -133,68 +133,33 @@ pub const DB = struct {
         if (self.memtable.Get(key)) |value|  {
             return value;
         }
-
+        std.debug.print("Searching Disk\n", .{});
         var dir = try std.fs.cwd().openDir(self.root_path, .{ .iterate = true });
         defer dir.close();
 
         var dir_iter = dir.iterate();
         while (try dir_iter.next()) |item| {
             if (item.kind == .file and std.mem.eql(u8, std.fs.path.extension(item.name), ".dbi")) {
-                const index_file = try dir.openFile(item.name, .{});
+                var index_file = try dir.openFile(item.name, .{});
                 defer index_file.close();
 
                 var arena = std.heap.ArenaAllocator.init(self.allocator);
                 defer arena.deinit();
 
-                const index_bytes = try index_file.readToEndAlloc(arena.allocator(), std.math.maxInt(u64));
-                assert(index_bytes.len > 0);
+                var index = Index.Init(&index_file);
 
-                var cursor: usize = 0;
-                while (true) {
-                    if (cursor == index_bytes.len) break;
+                if (try index.Search(key, arena.allocator())) |entry| {
+                    // TODO fix this hacky way to get the file name
+                    const db_file = try dir.openFile(item.name[0..item.name.len-1], .{});
+                    defer db_file.close();
 
-                    // Key Length: 8 bytes
-                    var step: usize = @sizeOf(u64);
-                    assert(cursor + step < index_bytes.len);
-                    const key_len_buffer = index_bytes[cursor..cursor+step];
-                    const key_len = std.mem.readVarInt(u64, key_len_buffer, .little);
-                    assert(key_len > 0);
-                    cursor += step;
-
-                    // Key: Length `key_len` bytes
-                    step = key_len;
-                    assert(cursor + step < index_bytes.len);
-                    const index_key = index_bytes[cursor..cursor+step];
-                    cursor += step;
-
-                    // Offset: 8 bytes
-                    step = @sizeOf(u64);
-                    assert(cursor + step < index_bytes.len);
-                    const offset_buffer = index_bytes[cursor..cursor+step];
-                    const offset = std.mem.readVarInt(u64, offset_buffer, .little);
-                    cursor += step;
-
-                    // Value Length: 8 bytes
-                    step = @sizeOf(u64);
-                    assert(cursor + step < index_bytes.len);
-                    const val_len_buffer = index_bytes[cursor..cursor+step];
-                    const val_len = std.mem.readVarInt(u64, val_len_buffer, .little);
-                    cursor += step;
-
-                    // TODO we can move this check above the offset lookup and skip it
-                    // TODO refactor this logic to not be so nested
-                    if (std.mem.eql(u8, key, index_key)) {
-                        // TODO fix this hacky way to get the file name
-                        const db_file = try dir.openFile(item.name[0..item.name.len-1], .{});
-
-                        assert(offset + val_len < (try db_file.stat()).size);
-                        try db_file.seekTo(offset);
-                        // TODO think about this allocation
-                        const value = self.allocator.alloc(u8, val_len) catch unreachable;
-                        const read = try db_file.reader().read(value);
-                        assert(read == val_len); // TODO clean up asserts that aren't really assertions
-                        return value;
-                    }
+                    assert(entry.offset + entry.length < (try db_file.stat()).size);
+                    try db_file.seekTo(entry.offset);
+                    // TODO think about this allocation
+                    const value = self.allocator.alloc(u8, entry.length) catch unreachable;
+                    const read = try db_file.reader().read(value);
+                    assert(read == entry.length); // TODO clean up asserts that aren't really assertions
+                    return value;
                 }
                 // TODO read multiple index files
                 break;
@@ -366,4 +331,69 @@ const WAL = struct {
             try self.buffered_writer.flush();
         }
     };
+};
+
+const Index = struct {
+    file: *std.fs.File,
+
+    pub fn Init(file: *std.fs.File) Index {
+        return .{
+            .file = file,
+        };
+    }
+
+    const Entry = struct {
+        key: []const u8,
+        offset: usize,
+        length: usize,
+    };
+
+    pub fn Search(self: *Index, key: []const u8, allocator: std.mem.Allocator) !?Entry {
+        const bytes = try self.file.readToEndAlloc(allocator, std.math.maxInt(u64));
+        defer allocator.free(bytes);
+        assert(bytes.len > 0);
+
+        var cursor: usize = 0;
+        while (true) {
+            if (cursor >= bytes.len) return null;
+
+            // Key Length: 8 bytes
+            var step: usize = @sizeOf(u64);
+            assert(cursor + step < bytes.len);
+            const key_len_buffer = bytes[cursor..cursor+step];
+            const key_len = std.mem.readVarInt(u64, key_len_buffer, .little);
+            assert(key_len > 0);
+            cursor += step;
+
+            // Key: Length `key_len` bytes
+            step = key_len;
+            assert(cursor + step < bytes.len);
+            const index_key = bytes[cursor..cursor+step];
+            cursor += step;
+
+            if (std.mem.eql(u8, key, index_key)) {
+                // Offset: 8 bytes
+                step = @sizeOf(u64);
+                assert(cursor + step < bytes.len);
+                const offset_buffer = bytes[cursor..cursor+step];
+                const offset = std.mem.readVarInt(u64, offset_buffer, .little);
+                cursor += step;
+
+                // Value Length: 8 bytes
+                step = @sizeOf(u64);
+                assert(cursor + step < bytes.len);
+                const length_buffer = bytes[cursor..cursor+step];
+                const length = std.mem.readVarInt(u64, length_buffer, .little);
+                cursor += step;
+
+                return .{
+                    .key = index_key,
+                    .offset = offset,
+                    .length = length,
+                };
+            } else {
+                cursor += 2 * @sizeOf(u64);
+            }
+        }
+    }
 };

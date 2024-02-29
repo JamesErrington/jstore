@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
 
     const exe = b.addExecutable(.{
-        .name = "tasiadb",
+        .name = "jstore",
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
         .optimize = optimize,
@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) !void {
 
     {
         const options = b.addOptions();
-        options.addOption([]const u8, "name", "TasiaDB");
+        options.addOption([]const u8, "name", "JStore");
         options.addOption([]const u8, "version", "0.0.1");
 
         const now = zdt.datetime.Datetime.now();

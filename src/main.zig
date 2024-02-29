@@ -1,9 +1,9 @@
 const std = @import("std");
 
-const tdb = @import("./lib.zig");
+const j = @import("./lib.zig");
 
 pub fn main() !void {
-    var db = try tdb.DB.LoadFromDir(std.heap.c_allocator, "./data/");
+    var db = try j.DB.LoadFromDir(std.heap.c_allocator, "./data/");
     defer db.Close();
 
     std.debug.print("name: {!?s}\n", .{db.Get("name")});
@@ -13,5 +13,5 @@ pub fn main() !void {
 
     // try db.Put("job", "unemployed");
     std.debug.print("job: {!?s}\n", .{db.Get("job")});
-    // std.debug.print("MemTable size: {}\n", .{db.memtable.Size()});
+    std.debug.print("MemTable size: {}\n", .{db.memtable.Size()});
 }
