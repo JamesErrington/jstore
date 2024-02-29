@@ -87,16 +87,17 @@ pub const DB = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
 
+        const path_buffer = arena.allocator().alloc(u8, self.root_path.len + 1 + 19 + 4 + 1) catch unreachable;
         const timestamp = micro_time();
-        const db_path = std.fmt.allocPrint(arena.allocator(), "{s}/{}.db", .{self.root_path, timestamp}) catch unreachable;
-        var db_file = try std.fs.cwd().createFile(db_path, .{});
+
+        const db_path = std.fmt.bufPrintZ(path_buffer, "{s}/{}.db", .{self.root_path, timestamp}) catch unreachable;
+        var db_file = try std.fs.cwd().createFileZ(db_path, .{});
         defer db_file.close();
         var db_buffer = std.io.bufferedWriter(db_file.writer());
         const db_writer = db_buffer.writer();
 
-        // TODO: Can we avoid this allocation?
-        const index_path = std.fmt.allocPrint(arena.allocator(), "{s}/{}.dbi", .{self.root_path, timestamp}) catch unreachable;
-        var index_file = try std.fs.cwd().createFile(index_path, .{});
+        const index_path = std.fmt.bufPrintZ(path_buffer, "{s}/{}.dbi", .{self.root_path, timestamp}) catch unreachable;
+        var index_file = try std.fs.cwd().createFileZ(index_path, .{});
         defer index_file.close();
         var index_buffer = std.io.bufferedWriter(index_file.writer());
         const index_writer = index_buffer.writer();
