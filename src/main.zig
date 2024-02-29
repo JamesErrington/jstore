@@ -6,8 +6,12 @@ pub fn main() !void {
     var db = try tdb.DB.LoadFromDir(std.heap.c_allocator, "./data/");
     defer db.Close();
 
-    std.debug.print("Name: {?s}\n", .{db.memtable.Get("name")});
-    std.debug.print("Country: {?s}\n", .{db.memtable.Get("address")});
-    std.debug.print("Message: {?s}\n", .{db.memtable.Get("age")});
+    std.debug.print("name: {!?s}\n", .{db.Get("name")});
+    std.debug.print("country: {!?s}\n", .{db.Get("address")});
+    std.debug.print("age: {!?s}\n", .{db.Get("age")});
     std.debug.print("MemTable size: {}\n", .{db.memtable.Size()});
+
+    // try db.Put("job", "unemployed");
+    std.debug.print("job: {!?s}\n", .{db.Get("job")});
+    // std.debug.print("MemTable size: {}\n", .{db.memtable.Size()});
 }

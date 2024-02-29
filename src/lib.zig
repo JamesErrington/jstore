@@ -2,13 +2,24 @@ const std = @import("std");
 
 const assert = std.debug.assert;
 
+fn micro_time() u64 {
+    return @intCast(std.time.microTimestamp());
+}
+
 fn lessThanString(_: void, lhs: []const u8, rhs: []const u8) bool {
     return std.mem.order(u8, lhs, rhs) == .lt;
 }
 
 pub const DB = struct {
+    root_path: []const u8,
+    allocator: std.mem.Allocator,
     memtable: MemTable,
     wal_writer: WAL.Writer,
+
+    const MEMTABLE_THRESHOLD_BYTES = 4096;
+    comptime {
+        assert(MEMTABLE_THRESHOLD_BYTES > 0);
+    }
 
     pub fn LoadFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !DB {
         var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
@@ -48,6 +59,8 @@ pub const DB = struct {
         }
 
         return .{
+            .root_path = dir_path,
+            .allocator = allocator,
             .memtable = memtable,
             .wal_writer = wal_writer,
         };
@@ -57,25 +70,162 @@ pub const DB = struct {
         self.memtable.Destroy();
         self.wal_writer.Destroy();
     }
+
+    pub fn Put(self: *DB, key: []const u8, value: []const u8) !void {
+        try self.wal_writer.WriteEntry(.{ .key = key, .value = value, .timestamp = micro_time() });
+        try self.wal_writer.Flush();
+        self.memtable.Set(key, value);
+
+        if (self.memtable.Size() > MEMTABLE_THRESHOLD_BYTES) {
+            try self.flush_memtable();
+        }
+    }
+
+    fn flush_memtable(self: *DB) !void {
+        std.debug.print("Flushing MemTable!\n", .{});
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+
+        const timestamp = micro_time();
+        const db_path = std.fmt.allocPrint(arena.allocator(), "{s}/{}.db", .{self.root_path, timestamp}) catch unreachable;
+        var db_file = try std.fs.cwd().createFile(db_path, .{});
+        defer db_file.close();
+        var db_buffer = std.io.bufferedWriter(db_file.writer());
+        const db_writer = db_buffer.writer();
+
+        // TODO: Can we avoid this allocation?
+        const index_path = std.fmt.allocPrint(arena.allocator(), "{s}/{}.dbi", .{self.root_path, timestamp}) catch unreachable;
+        var index_file = try std.fs.cwd().createFile(index_path, .{});
+        defer index_file.close();
+        var index_buffer = std.io.bufferedWriter(index_file.writer());
+        const index_writer = index_buffer.writer();
+
+        // TODO: Remove when we use a pre sorted memtable
+        const keys = self.memtable.entries.keys();
+        std.sort.heap([]const u8, keys, {}, lessThanString);
+        try self.memtable.entries.reIndex(arena.allocator());
+
+        var cursor: usize = 0;
+        for (keys) |key| {
+            const value = self.memtable.Get(key).?;
+            cursor += key.len;
+
+            try index_writer.writeAll(std.mem.asBytes(&(@as(u64, key.len))));
+            try index_writer.writeAll(key);
+            try index_writer.writeAll(std.mem.asBytes(&(@as(u64, cursor))));
+            try index_writer.writeAll(std.mem.asBytes(&(@as(u64, value.len))));
+
+            try db_writer.writeAll(key);
+            try db_writer.writeAll(value);
+
+            cursor += value.len;
+        }
+        assert(cursor == self.memtable.Size());
+        try db_buffer.flush();
+        try index_buffer.flush();
+
+        self.memtable.Reset();
+    }
+
+    pub fn Get(self: *DB, key: []const u8) !?[]const u8 {
+        if (self.memtable.Get(key)) |value|  {
+            return value;
+        }
+
+        var dir = try std.fs.cwd().openDir(self.root_path, .{ .iterate = true });
+        defer dir.close();
+
+        var dir_iter = dir.iterate();
+        while (try dir_iter.next()) |item| {
+            if (item.kind == .file and std.mem.eql(u8, std.fs.path.extension(item.name), ".dbi")) {
+                const index_file = try dir.openFile(item.name, .{});
+                defer index_file.close();
+
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+
+                const index_bytes = try index_file.readToEndAlloc(arena.allocator(), std.math.maxInt(u64));
+                assert(index_bytes.len > 0);
+
+                var cursor: usize = 0;
+                while (true) {
+                    if (cursor == index_bytes.len) break;
+
+                    // Key Length: 8 bytes
+                    var step: usize = @sizeOf(u64);
+                    assert(cursor + step < index_bytes.len);
+                    const key_len_buffer = index_bytes[cursor..cursor+step];
+                    const key_len = std.mem.readVarInt(u64, key_len_buffer, .little);
+                    assert(key_len > 0);
+                    cursor += step;
+
+                    // Key: Length `key_len` bytes
+                    step = key_len;
+                    assert(cursor + step < index_bytes.len);
+                    const index_key = index_bytes[cursor..cursor+step];
+                    cursor += step;
+
+                    // Offset: 8 bytes
+                    step = @sizeOf(u64);
+                    assert(cursor + step < index_bytes.len);
+                    const offset_buffer = index_bytes[cursor..cursor+step];
+                    const offset = std.mem.readVarInt(u64, offset_buffer, .little);
+                    cursor += step;
+
+                    // Value Length: 8 bytes
+                    step = @sizeOf(u64);
+                    assert(cursor + step < index_bytes.len);
+                    const val_len_buffer = index_bytes[cursor..cursor+step];
+                    const val_len = std.mem.readVarInt(u64, val_len_buffer, .little);
+                    cursor += step;
+
+                    // TODO we can move this check above the offset lookup and skip it
+                    // TODO refactor this logic to not be so nested
+                    if (std.mem.eql(u8, key, index_key)) {
+                        // TODO fix this hacky way to get the file name
+                        const db_file = try dir.openFile(item.name[0..item.name.len-1], .{});
+
+                        assert(offset + val_len < (try db_file.stat()).size);
+                        try db_file.seekTo(offset);
+                        // TODO think about this allocation
+                        const value = self.allocator.alloc(u8, val_len) catch unreachable;
+                        const read = try db_file.reader().read(value);
+                        assert(read == val_len); // TODO clean up asserts that aren't really assertions
+                        return value;
+                    }
+                }
+                // TODO read multiple index files
+                break;
+            }
+        }
+
+        return null;
+    }
 };
 
 const MemTable = struct {
     arena: std.heap.ArenaAllocator,
-    entries: std.StringHashMapUnmanaged([]const u8),
+    // TODO: not use a hashmap
+    entries: std.StringArrayHashMapUnmanaged([]const u8),
     size: usize,
-    frozen: bool,
 
     pub fn Create(allocator: std.mem.Allocator) MemTable {
         return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
-            .entries = std.StringHashMapUnmanaged([]const u8){},
+            .entries = std.StringArrayHashMapUnmanaged([]const u8){},
             .size = 0,
-            .frozen = false,
         };
     }
 
     pub fn Destroy(self: *MemTable) void {
         self.arena.deinit();
+    }
+
+    pub fn Reset(self: *MemTable) void {
+        self.arena.deinit();
+        self.entries = std.StringArrayHashMapUnmanaged([]const u8){};
+        self.size = 0;
     }
 
     pub fn Size(self: *MemTable) usize {
@@ -87,23 +237,16 @@ const MemTable = struct {
     }
 
     pub fn Set(self: *MemTable, key: []const u8, value: []const u8) void {
-        self.size += key.len + value.len;
-        self.entries.put(self.arena.allocator(), key, value) catch unreachable;
-    }
-
-    pub fn UpdateSize(self: *MemTable) void {
-        var iter = self.entries.iterator();
-        while (iter.next()) |entry| {
-            self.size += entry.key_ptr.*.len + entry.value_ptr.*.len;
+        // TODO this is exact size - could we use a heuristic that is pessimistic instead?
+        // That could avoid the need to lookup the value
+        var entry_size = key.len + value.len;
+        if (self.entries.contains(key)) {
+            entry_size -= (key.len + self.entries.get(key).?.len);
         }
-    }
 
-    pub fn Freeze(self: *MemTable) void {
-        self.frozen = true;
-    }
-
-    pub fn IsFrozen(self: *MemTable) bool {
-        return self.frozen;
+        self.size += entry_size;
+        assert(self.size > 0);
+        self.entries.put(self.arena.allocator(), key, value) catch unreachable;
     }
 };
 
@@ -181,7 +324,7 @@ const WAL = struct {
         pub fn Create(allocator: std.mem.Allocator, dir_path: []const u8) !Writer {
             try std.fs.cwd().makePath(dir_path);
 
-            const timestamp: u64 = @intCast(std.time.microTimestamp());
+            const timestamp = micro_time();
             const filename = try std.fmt.allocPrint(allocator, "{s}/{d}.wal", .{ dir_path, timestamp });
             defer allocator.free(filename);
 
